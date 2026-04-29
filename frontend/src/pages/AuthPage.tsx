@@ -119,24 +119,41 @@ export default function AuthPage() {
   // them to this page with a URL fragment like:
   //   /auth#access_token=...&type=recovery
   // We detect this and show the "set new password" form.
-  useEffect(() => {
-    const hash = window.location.hash
-    if (hash.includes('type=recovery') || (hash.includes('access_token') && hash.includes('type=recovery'))) {
-      setMode('reset_form')
-      return
+useEffect(() => {
+  const hash = window.location.hash
+  const params = new URLSearchParams(hash.replace('#', ''))
+  const type = params.get('type')
+  const errorCode = params.get('error_code')
+  const hasError = params.get('error')
+
+  // Valid recovery link → show reset form
+  if (type === 'recovery') {
+    setMode('reset_form')
+    window.history.replaceState(null, '', '/auth')
+    return
+  }
+
+  // Expired or invalid link → show friendly error on login page
+  if (hasError || errorCode) {
+    if (errorCode === 'otp_expired') {
+      setError('Your reset link has expired. Enter your email and click "Forgot password?" to get a new one.')
+    } else {
+      setError('The reset link is invalid or already used. Please request a new one.')
     }
-    // Also handle the case where Supabase uses the newer PKCE flow
-    // which may not include type=recovery in the hash but sets a session
-    if (hash.includes('access_token')) {
-      supabase.auth.getSession().then(({ data }) => {
-        if (data.session) {
-          // Check if this looks like a recovery session (no existing user session before)
-          // We show the reset form — safe because the user has a valid token
-          setMode('reset_form')
-        }
-      })
-    }
-  }, [])
+    window.history.replaceState(null, '', '/auth')
+    return
+  }
+
+  // Fallback for PKCE flow (access_token without type=recovery)
+  if (hash.includes('access_token')) {
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session) {
+        setMode('reset_form')
+        window.history.replaceState(null, '', '/auth')
+      }
+    })
+  }
+}, [])
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault()

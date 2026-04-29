@@ -1,12 +1,5 @@
-"""
-pattern_scanner.py — Regex-based vulnerability detection.
-
-Original interface (used by pipeline.py):
-    scanner = PatternScanner()          # no constructor args
-    findings = scanner.scan(repo_path, file_list)
-"""
 from __future__ import annotations
-
+import uuid
 import re
 from pathlib import Path
 from typing import List, Optional
@@ -528,7 +521,13 @@ class PatternScanner:
                        If None, scan all files under repo_path.
         """
         if file_list is not None:
-            files_to_scan = [Path(f) for f in file_list if Path(f).is_file()]
+            files_to_scan = []
+            for f in file_list:
+                p = Path(f)
+                if not p.is_absolute():
+                     p = Path(repo_path) / p
+                if p.is_file(): 
+                    files_to_scan.append(p)
         else:
             files_to_scan = [
                 f for f in Path(repo_path).rglob("*")
@@ -578,6 +577,7 @@ class PatternScanner:
                 code_snippet = "\n".join(lines[snippet_start:snippet_end]).strip()
 
                 findings.append(Finding(
+                    id=str(uuid.uuid4()),
                     title=rule["title"],
                     description=rule["description"],
                     severity=rule["severity"],
