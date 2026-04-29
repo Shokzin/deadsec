@@ -1,216 +1,594 @@
+"""
+pattern_scanner.py — Regex-based vulnerability detection.
+
+Original interface (used by pipeline.py):
+    scanner = PatternScanner()          # no constructor args
+    findings = scanner.scan(repo_path, file_list)
+"""
+from __future__ import annotations
+
 import re
-import uuid
-import os
 from pathlib import Path
+from typing import List, Optional
+
 from scanner.engine.finding import Finding
 
+SCANNABLE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx",
+    ".php", ".rb", ".java", ".go",
+    ".html", ".htm", ".env",
+    ".cfg", ".conf", ".ini", ".yaml", ".yml", ".json",
+}
 
-SECRET_PATTERNS = [
-    (
-        "exposed_api_key",
-        "Exposed API Key",
-        re.compile(r'(?i)(api[_-]?key|apikey)\s*[=:]\s*["\']?([a-zA-Z0-9_\-]{20,})["\']?'),
-        "critical", "CWE-312",
-        "A02:2021 – Cryptographic Failures",
-        "Move API keys to environment variables. Rotate the exposed key immediately.",
-    ),
-    (
-        "hardcoded_password",
-        "Hardcoded Password",
-        re.compile(r'(?i)(password|passwd|pwd)\s*[=:]\s*["\']([^"\']{4,})["\']'),
-        "critical", "CWE-259",
-        "A07:2021 – Identification and Authentication Failures",
-        "Never hardcode passwords. Use environment variables or a secrets manager.",
-    ),
-    (
-        "hardcoded_secret",
-        "Hardcoded Secret or Token",
-        re.compile(r'(?i)(secret|token|auth_token|access_token)\s*[=:]\s*["\']([a-zA-Z0-9_\-\.]{16,})["\']'),
-        "high", "CWE-798",
-        "A07:2021 – Identification and Authentication Failures",
-        "Externalize secrets using environment variables or a vault service.",
-    ),
-    (
-        "aws_access_key",
-        "AWS Access Key ID Exposed",
-        re.compile(r'(?<![A-Z0-9])(AKIA[0-9A-Z]{16})(?![A-Z0-9])'),
-        "critical", "CWE-312",
-        "A02:2021 – Cryptographic Failures",
-        "Revoke this AWS key immediately and rotate. Use IAM roles instead of static keys.",
-    ),
-    (
-        "private_key_material",
-        "Private Key Material in Source",
-        re.compile(r'-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'),
-        "critical", "CWE-321",
-        "A02:2021 – Cryptographic Failures",
-        "Remove private key from repository immediately. Rotate the key pair.",
-    ),
-    (
-        "github_token",
-        "GitHub Personal Access Token",
-        re.compile(r'gh[pousr]_[A-Za-z0-9_]{36,}'),
-        "critical", "CWE-312",
-        "A02:2021 – Cryptographic Failures",
-        "Revoke this GitHub token immediately and use GitHub Actions secrets instead.",
-    ),
-    (
-        "database_url",
-        "Database Connection String with Credentials",
-        re.compile(r'(?i)(postgres|mysql|mongodb|redis):\/\/[^:]+:[^@]+@'),
-        "critical", "CWE-312",
-        "A02:2021 – Cryptographic Failures",
-        "Use environment variables for connection strings. Never hardcode credentials.",
-    ),
-    (
-        "jwt_secret",
-        "JWT Secret Hardcoded",
-        re.compile(r'(?i)(jwt[_-]?secret|jwt[_-]?key)\s*[=:]\s*["\']([^"\']{8,})["\']'),
-        "high", "CWE-321",
-        "A02:2021 – Cryptographic Failures",
-        "Use a cryptographically random JWT secret stored as an environment variable.",
-    ),
+SKIP_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    "env", "dist", "build", ".mypy_cache", "coverage",
+}
+
+PATTERNS = [
+
+    # ── SECRETS & CREDENTIALS ──────────────────────────────────────────────────
+    {
+        "pattern": re.compile(
+            r'(?:password|passwd|pwd|secret|api_key|apikey|token|auth_token|access_token)\s*'
+            r'=\s*["\'][^"\']{4,}["\']',
+            re.IGNORECASE,
+        ),
+        "title": "Hardcoded Password or Secret",
+        "description": (
+            "A credential or secret key is hardcoded as a string literal. "
+            "This exposes the credential to anyone with access to the source code."
+        ),
+        "severity": "critical",
+        "type": "secrets",
+        "cwe_id": "CWE-798",
+        "owasp": "A02:2021 — Cryptographic Failures",
+        "recommendation": "Move all secrets to environment variables. Never hardcode credentials.",
+        "extensions": None,
+    },
+    {
+        "pattern": re.compile(
+            r'(?:AWS_ACCESS_KEY_ID|AWS_SECRET|GITHUB_TOKEN|SLACK_TOKEN|STRIPE_KEY)\s*=\s*["\'][A-Za-z0-9/+]{10,}["\']',
+            re.IGNORECASE,
+        ),
+        "title": "Hardcoded Cloud or Service Credential",
+        "description": "A cloud provider or third-party service credential is hardcoded.",
+        "severity": "critical",
+        "type": "secrets",
+        "cwe_id": "CWE-798",
+        "owasp": "A02:2021 — Cryptographic Failures",
+        "recommendation": "Use environment variables or a dedicated secrets manager.",
+        "extensions": None,
+    },
+    {
+        "pattern": re.compile(r'BEGIN (?:RSA|EC|OPENSSH|PGP) PRIVATE KEY', re.IGNORECASE),
+        "title": "Private Key in Source Code",
+        "description": "A cryptographic private key is embedded in the source file.",
+        "severity": "critical",
+        "type": "secrets",
+        "cwe_id": "CWE-321",
+        "owasp": "A02:2021 — Cryptographic Failures",
+        "recommendation": "Remove and rotate the key immediately. Store keys outside the codebase.",
+        "extensions": None,
+    },
+
+    # ── SQL INJECTION ──────────────────────────────────────────────────────────
+    {
+        "pattern": re.compile(
+            r'(?:execute|cursor\.execute|db\.execute|query)\s*\(\s*'
+            r'(?:f["\']|["\'].*?\+|.*?%\s*(?:user|request|input|param|data|name|id|value))',
+            re.IGNORECASE,
+        ),
+        "title": "SQL Injection via String Formatting",
+        "description": (
+            "A database query is constructed by concatenating or formatting "
+            "user-controlled data into the SQL string."
+        ),
+        "severity": "critical",
+        "type": "sql_injection",
+        "cwe_id": "CWE-89",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Use parameterized queries. Never format user input directly into SQL strings.",
+        "extensions": {".py", ".php", ".rb", ".java"},
+    },
+    {
+        "pattern": re.compile(
+            r'["\']SELECT\s.+FROM\s.+WHERE\s.+["\'\s]*\+|f["\']SELECT\s.+FROM\s.+WHERE\s',
+            re.IGNORECASE,
+        ),
+        "title": "SQL Injection — Raw Query Construction",
+        "description": "A SELECT statement is built using string concatenation or f-string formatting.",
+        "severity": "critical",
+        "type": "sql_injection",
+        "cwe_id": "CWE-89",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Use parameterized queries: cursor.execute('SELECT ... WHERE id = %s', (id,))",
+        "extensions": {".py", ".js", ".ts", ".php"},
+    },
+    {
+        "pattern": re.compile(
+            r'(?:db|connection|conn|pool)\.query\s*\(\s*'
+            r'(?:`[^`]*\$\{|["\'].*?\+\s*(?:req\.|request\.|params\.|body\.|query\.))',
+            re.IGNORECASE,
+        ),
+        "title": "SQL Injection in JavaScript Query",
+        "description": "A SQL query in JavaScript is built with request data via template literals or concatenation.",
+        "severity": "critical",
+        "type": "sql_injection",
+        "cwe_id": "CWE-89",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Use parameterized queries: db.query('SELECT ... WHERE id = ?', [id])",
+        "extensions": {".js", ".ts"},
+    },
+
+    # ── COMMAND INJECTION ──────────────────────────────────────────────────────
+    {
+        "pattern": re.compile(
+            r'os\.system\s*\([^)]*(?:input|request|param|user|data|name|cmd|command|args?)',
+            re.IGNORECASE,
+        ),
+        "title": "Command Injection via os.system()",
+        "description": (
+            "os.system() is called with a value that may originate from user input. "
+            "Attackers can inject shell commands using metacharacters like ; | & `"
+        ),
+        "severity": "critical",
+        "type": "command_injection",
+        "cwe_id": "CWE-78",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Use subprocess.run() with a list of arguments and shell=False.",
+        "extensions": {".py"},
+    },
+    {
+        "pattern": re.compile(
+            r'os\.system\s*\(\s*(?:f["\']|["\'][^"\']*\+)',
+            re.IGNORECASE,
+        ),
+        "title": "Command Injection via os.system() with Dynamic String",
+        "description": "os.system() is called with a dynamically constructed string.",
+        "severity": "critical",
+        "type": "command_injection",
+        "cwe_id": "CWE-78",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Replace os.system() with subprocess.run(args_list, shell=False).",
+        "extensions": {".py"},
+    },
+    {
+        "pattern": re.compile(r'os\.popen\s*\(', re.IGNORECASE),
+        "title": "Command Injection via os.popen()",
+        "description": "os.popen() executes a shell command and is vulnerable to injection.",
+        "severity": "high",
+        "type": "command_injection",
+        "cwe_id": "CWE-78",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Use subprocess.run() with a list of arguments instead.",
+        "extensions": {".py"},
+    },
+    {
+        "pattern": re.compile(
+            r'subprocess\.(call|run|Popen|check_output)\s*\([^)]*shell\s*=\s*True',
+            re.IGNORECASE,
+        ),
+        "title": "subprocess Called with shell=True",
+        "description": (
+            "Passing shell=True exposes the application to shell injection "
+            "if any part of the command is user-controlled."
+        ),
+        "severity": "high",
+        "type": "command_injection",
+        "cwe_id": "CWE-78",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Use shell=False and pass the command as a list.",
+        "extensions": {".py"},
+    },
+    {
+        "pattern": re.compile(
+            r'(?:exec|execSync|spawn|spawnSync|execFile)\s*\(\s*'
+            r'(?:`[^`]*\$\{|[^)]*(?:req\.|request\.|params\.|body\.|query\.))',
+            re.IGNORECASE,
+        ),
+        "title": "Command Injection in JavaScript",
+        "description": "A child_process function is called with user-controlled data in the command string.",
+        "severity": "critical",
+        "type": "command_injection",
+        "cwe_id": "CWE-78",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Avoid shell execution with user input. Use execFile with an argument array.",
+        "extensions": {".js", ".ts"},
+    },
+
+    # ── PATH TRAVERSAL ─────────────────────────────────────────────────────────
+    {
+        "pattern": re.compile(
+            r'\bopen\s*\(\s*(?:[^)]*(?:request\.|input\b|param|user|data|filename|file_path|path))',
+            re.IGNORECASE,
+        ),
+        "title": "Path Traversal via open()",
+        "description": (
+            "A file is opened using a path that may be derived from user input. "
+            "Attackers can use sequences like ../../ to access arbitrary files."
+        ),
+        "severity": "high",
+        "type": "path_traversal",
+        "cwe_id": "CWE-22",
+        "owasp": "A01:2021 — Broken Access Control",
+        "recommendation": "Use os.path.realpath() and verify the path is within the expected base directory.",
+        "extensions": {".py"},
+    },
+    {
+        "pattern": re.compile(
+            r'\bopen\s*\(\s*(?:f["\']|["\'][^"\']*\+)',
+            re.IGNORECASE,
+        ),
+        "title": "Path Traversal — Dynamic File Path",
+        "description": "A file is opened with a dynamically constructed path.",
+        "severity": "high",
+        "type": "path_traversal",
+        "cwe_id": "CWE-22",
+        "owasp": "A01:2021 — Broken Access Control",
+        "recommendation": "Resolve the path with os.path.realpath() and verify it is within the expected directory.",
+        "extensions": {".py"},
+    },
+    {
+        "pattern": re.compile(
+            r'(?:readFile|readFileSync|createReadStream)\s*\(\s*'
+            r'(?:`[^`]*\$\{|[^)]*(?:req\.|request\.|params\.|body\.|query\.))',
+            re.IGNORECASE,
+        ),
+        "title": "Path Traversal in JavaScript File Read",
+        "description": "A file is read using a path influenced by request data.",
+        "severity": "high",
+        "type": "path_traversal",
+        "cwe_id": "CWE-22",
+        "owasp": "A01:2021 — Broken Access Control",
+        "recommendation": "Resolve paths with path.resolve() and verify they are within a safe base directory.",
+        "extensions": {".js", ".ts"},
+    },
+    {
+        "pattern": re.compile(r'\.\./|\.\.[/\\]|%2e%2e[/\\%]', re.IGNORECASE),
+        "title": "Path Traversal Sequence Detected",
+        "description": "A literal path traversal sequence (../) was found in the code.",
+        "severity": "medium",
+        "type": "path_traversal",
+        "cwe_id": "CWE-22",
+        "owasp": "A01:2021 — Broken Access Control",
+        "recommendation": "Do not use relative traversal sequences. Resolve and validate all paths.",
+        "extensions": None,
+    },
+
+    # ── XSS ───────────────────────────────────────────────────────────────────
+    {
+        "pattern": re.compile(r'\.innerHTML\s*=\s*(?![\'"]\s*[\'"])', re.IGNORECASE),
+        "title": "Cross-Site Scripting via innerHTML",
+        "description": (
+            "Assigning to innerHTML with a non-static value can introduce XSS. "
+            "If the value contains user-controlled content, scripts can be injected."
+        ),
+        "severity": "high",
+        "type": "xss",
+        "cwe_id": "CWE-79",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Use textContent for text. If HTML is required, sanitize with DOMPurify.",
+        "extensions": {".js", ".ts", ".jsx", ".tsx", ".html", ".htm"},
+    },
+    {
+        "pattern": re.compile(r'document\.write\s*\(', re.IGNORECASE),
+        "title": "Cross-Site Scripting via document.write()",
+        "description": "document.write() can inject arbitrary HTML and is a common XSS vector.",
+        "severity": "high",
+        "type": "xss",
+        "cwe_id": "CWE-79",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Avoid document.write(). Use createElement and appendChild instead.",
+        "extensions": {".js", ".ts", ".jsx", ".tsx", ".html"},
+    },
+    {
+        "pattern": re.compile(r'\.outerHTML\s*=|\.insertAdjacentHTML\s*\(', re.IGNORECASE),
+        "title": "Cross-Site Scripting via outerHTML/insertAdjacentHTML",
+        "description": "These methods insert raw HTML and can introduce XSS if content is user-controlled.",
+        "severity": "high",
+        "type": "xss",
+        "cwe_id": "CWE-79",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Sanitize all content inserted as HTML. Prefer textContent or DOMPurify.",
+        "extensions": {".js", ".ts", ".jsx", ".tsx"},
+    },
+
+    # ── MISCONFIGURATIONS ──────────────────────────────────────────────────────
+    {
+        "pattern": re.compile(
+            r'cors\s*\(\s*\{[^}]*origin\s*:\s*["\']?\*["\']?',
+            re.IGNORECASE,
+        ),
+        "title": "CORS Wildcard Origin",
+        "description": "CORS is configured with a wildcard origin (*), allowing any website to make cross-origin requests.",
+        "severity": "medium",
+        "type": "misconfiguration",
+        "cwe_id": "CWE-942",
+        "owasp": "A05:2021 — Security Misconfiguration",
+        "recommendation": "Restrict CORS to specific trusted origins. Never use * for authenticated APIs.",
+        "extensions": {".js", ".ts", ".py"},
+    },
+    {
+        "pattern": re.compile(
+            r'Access-Control-Allow-Origin["\s]*:\s*["\']?\*',
+            re.IGNORECASE,
+        ),
+        "title": "CORS Wildcard in Response Header",
+        "description": "The Access-Control-Allow-Origin header is set to *, allowing any origin.",
+        "severity": "medium",
+        "type": "misconfiguration",
+        "cwe_id": "CWE-942",
+        "owasp": "A05:2021 — Security Misconfiguration",
+        "recommendation": "Set Access-Control-Allow-Origin to a specific domain.",
+        "extensions": None,
+    },
+    {
+        "pattern": re.compile(
+            r'(?:DEBUG|debug)\s*=\s*(?:True|true|1|"true"|\'true\')',
+            re.IGNORECASE,
+        ),
+        "title": "Debug Mode Enabled in Production Config",
+        "description": "Debug mode exposes stack traces, internal paths, and configuration details.",
+        "severity": "medium",
+        "type": "misconfiguration",
+        "cwe_id": "CWE-94",
+        "owasp": "A05:2021 — Security Misconfiguration",
+        "recommendation": "Disable debug mode in production. Use environment variables to toggle it.",
+        "extensions": None,
+    },
+    {
+        "pattern": re.compile(
+            r'(?:res\.json|response\.json|res\.send|console\.log)\s*\(\s*process\.env\b',
+            re.IGNORECASE,
+        ),
+        "title": "Environment Variables Exposed in Response",
+        "description": "process.env is sent in a response or logged, potentially exposing secrets.",
+        "severity": "critical",
+        "type": "misconfiguration",
+        "cwe_id": "CWE-200",
+        "owasp": "A05:2021 — Security Misconfiguration",
+        "recommendation": "Never send process.env in a response. Whitelist only non-sensitive keys.",
+        "extensions": {".js", ".ts"},
+    },
+
+    # ── LOGIC FLAWS ───────────────────────────────────────────────────────────
+    {
+        "pattern": re.compile(
+            r'(?:get|find|fetch|query|select)\w*\s*\(\s*(?:request\.|req\.|params\.|input\.|user_)?'
+            r'(?:id|user_id|account_id|object_id|resource_id)\b',
+            re.IGNORECASE,
+        ),
+        "title": "Potential Insecure Direct Object Reference (IDOR)",
+        "description": (
+            "An object is looked up using an ID that may come from user input "
+            "without verifying the requesting user is authorized."
+        ),
+        "severity": "high",
+        "type": "access_control",
+        "cwe_id": "CWE-639",
+        "owasp": "A01:2021 — Broken Access Control",
+        "recommendation": "Verify the authenticated user's ownership before returning or modifying records.",
+        "extensions": {".py", ".js", ".ts"},
+    },
+    {
+        "pattern": re.compile(
+            r'Object\.assign\s*\(\s*\w+\s*,\s*req\.body\b',
+            re.IGNORECASE,
+        ),
+        "title": "Mass Assignment via Object.assign(req.body)",
+        "description": (
+            "Object.assign() copies all req.body properties onto a model. "
+            "An attacker can inject unexpected fields like isAdmin."
+        ),
+        "severity": "high",
+        "type": "access_control",
+        "cwe_id": "CWE-915",
+        "owasp": "A01:2021 — Broken Access Control",
+        "recommendation": "Explicitly whitelist allowed fields. Never assign req.body directly to a model.",
+        "extensions": {".js", ".ts"},
+    },
+    {
+        "pattern": re.compile(r'(?:\.\.\.req\.body|spread\s*\(\s*req\.body)', re.IGNORECASE),
+        "title": "Mass Assignment via Spread of req.body",
+        "description": "Spreading req.body into a model allows attackers to inject arbitrary fields.",
+        "severity": "high",
+        "type": "access_control",
+        "cwe_id": "CWE-915",
+        "owasp": "A01:2021 — Broken Access Control",
+        "recommendation": "Destructure only explicitly allowed fields from req.body.",
+        "extensions": {".js", ".ts"},
+    },
+    {
+        "pattern": re.compile(
+            r'@app\.(?:route|get|post|put|delete|patch)\s*\([^)]*\)\s*\n'
+            r'(?:(?:@(?!login_required|require_login|auth_required)[^\n]+\n)*)'
+            r'(?:async\s+)?def\s+\w+\s*\([^)]*\)\s*:',
+            re.IGNORECASE,
+        ),
+        "title": "Route Potentially Missing Authentication Check",
+        "description": (
+            "A route handler does not appear to use an authentication decorator. "
+            "If this route accesses sensitive data, unauthenticated users may reach it."
+        ),
+        "severity": "high",
+        "type": "access_control",
+        "cwe_id": "CWE-306",
+        "owasp": "A01:2021 — Broken Access Control",
+        "recommendation": "Add authentication verification to all routes that handle sensitive operations.",
+        "extensions": {".py"},
+    },
+
+    # ── CODE QUALITY ──────────────────────────────────────────────────────────
+    {
+        "pattern": re.compile(r'\beval\s*\(', re.IGNORECASE),
+        "title": "Dynamic Code Execution via eval()",
+        "description": (
+            "eval() executes arbitrary code at runtime. If the argument contains "
+            "user-controlled data, this is a critical code injection vulnerability."
+        ),
+        "severity": "critical",
+        "type": "code_quality",
+        "cwe_id": "CWE-95",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Remove eval(). Use json.loads() for data parsing or explicit function calls.",
+        "extensions": {".py", ".js", ".ts"},
+    },
+    {
+        "pattern": re.compile(r'\bexec\s*\(\s*(?!subprocess)', re.IGNORECASE),
+        "title": "Dynamic Code Execution via exec()",
+        "description": "exec() executes arbitrary Python code and is dangerous with user-controlled input.",
+        "severity": "critical",
+        "type": "code_quality",
+        "cwe_id": "CWE-95",
+        "owasp": "A03:2021 — Injection",
+        "recommendation": "Avoid exec() entirely. Refactor to use explicit functions.",
+        "extensions": {".py"},
+    },
+    {
+        "pattern": re.compile(r'pickle\.(?:loads?|Unpickler)\s*\(', re.IGNORECASE),
+        "title": "Unsafe Deserialization with pickle.loads()",
+        "description": (
+            "pickle.load/loads can execute arbitrary code during deserialization "
+            "if data comes from an untrusted source."
+        ),
+        "severity": "critical",
+        "type": "code_quality",
+        "cwe_id": "CWE-502",
+        "owasp": "A08:2021 — Software and Data Integrity Failures",
+        "recommendation": "Use json or another safe format. Never unpickle data from untrusted sources.",
+        "extensions": {".py"},
+    },
+    {
+        "pattern": re.compile(
+            r'\byaml\.load\s*\([^)]*\)(?!\s*,\s*Loader\s*=\s*yaml\.SafeLoader)',
+            re.IGNORECASE,
+        ),
+        "title": "Unsafe YAML Deserialization",
+        "description": "yaml.load() without SafeLoader can execute arbitrary Python code embedded in YAML.",
+        "severity": "high",
+        "type": "code_quality",
+        "cwe_id": "CWE-502",
+        "owasp": "A08:2021 — Software and Data Integrity Failures",
+        "recommendation": "Use yaml.safe_load() instead of yaml.load().",
+        "extensions": {".py"},
+    },
+    {
+        "pattern": re.compile(r'hashlib\.(?:md5|sha1)\s*\(', re.IGNORECASE),
+        "title": "Use of Weak Cryptographic Hash Function",
+        "description": "MD5 and SHA-1 are cryptographically broken and should not be used for security.",
+        "severity": "medium",
+        "type": "code_quality",
+        "cwe_id": "CWE-327",
+        "owasp": "A02:2021 — Cryptographic Failures",
+        "recommendation": "Use SHA-256 or SHA-3 for hashing. For passwords, use bcrypt, scrypt, or argon2.",
+        "extensions": {".py"},
+    },
+    {
+        "pattern": re.compile(
+            r'verify\s*=\s*False|ssl\._create_unverified_context|check_hostname\s*=\s*False',
+            re.IGNORECASE,
+        ),
+        "title": "SSL/TLS Certificate Verification Disabled",
+        "description": "TLS verification is disabled, making connections vulnerable to man-in-the-middle attacks.",
+        "severity": "high",
+        "type": "misconfiguration",
+        "cwe_id": "CWE-295",
+        "owasp": "A02:2021 — Cryptographic Failures",
+        "recommendation": "Always verify SSL certificates. Remove verify=False.",
+        "extensions": {".py"},
+    },
 ]
-
-MISCONFIG_PATTERNS = [
-    (
-        "debug_mode_enabled",
-        "Debug Mode Enabled in Production Config",
-        re.compile(r'(?i)(debug\s*[=:]\s*(true|1|yes|on)|DEBUG\s*=\s*True)'),
-        "medium", "CWE-94",
-        "A05:2021 – Security Misconfiguration",
-        "Disable debug mode in production. Use environment-specific configuration.",
-    ),
-    (
-        "cors_wildcard",
-        "CORS Wildcard Origin Allowed",
-        re.compile(r'(?i)(allow[_-]?origins?|Access-Control-Allow-Origin)\s*[=:]\s*["\']?\*["\']?'),
-        "high", "CWE-942",
-        "A05:2021 – Security Misconfiguration",
-        "Restrict CORS to specific trusted origins instead of using a wildcard.",
-    ),
-    (
-        "insecure_cookie",
-        "Cookie Without Secure or HttpOnly Flag",
-        re.compile(r'(?i)set[_-]?cookie.*(?!secure)(?!httponly)'),
-        "medium", "CWE-614",
-        "A05:2021 – Security Misconfiguration",
-        "Set Secure and HttpOnly flags on all session cookies.",
-    ),
-]
-
-INJECTION_PATTERNS = [
-    (
-        "sql_injection_string_concat",
-        "Potential SQL Injection via String Concatenation",
-        re.compile(r'(?i)(SELECT|INSERT|UPDATE|DELETE|WHERE)[^;]*\+\s*[\w$]+\s*\+'),
-        "critical", "CWE-89",
-        "A03:2021 – Injection",
-        "Use parameterized queries or an ORM. Never concatenate user input into SQL strings.",
-    ),
-    (
-        "sql_injection_format",
-        "SQL Injection via String Formatting",
-        re.compile(r'(?i)(SELECT|INSERT|UPDATE|DELETE|WHERE)[^;]*%[s\d]'),
-        "critical", "CWE-89",
-        "A03:2021 – Injection",
-        "Use parameterized queries. String formatting in SQL is always dangerous.",
-    ),
-    (
-        "xss_innerhtml",
-        "Potential XSS via innerHTML Assignment",
-        re.compile(r'\.innerHTML\s*=\s*(?!["\'`][^"\'`]*["\'`])'),
-        "high", "CWE-79",
-        "A03:2021 – Injection",
-        "Use textContent for plain text or a sanitization library for HTML content.",
-    ),
-    (
-        "xss_document_write",
-        "Potential XSS via document.write",
-        re.compile(r'document\.write\('),
-        "high", "CWE-79",
-        "A03:2021 – Injection",
-        "Avoid document.write. Use DOM manipulation methods with proper escaping instead.",
-    ),
-    (
-        "command_injection",
-        "Potential Command Injection",
-        re.compile(r'(?i)(subprocess\.(call|run|Popen)|os\.system|exec\(|eval\()\s*\([^)]*\+'),
-        "critical", "CWE-78",
-        "A03:2021 – Injection",
-        "Never pass user-controlled input to shell commands. Use parameterized subprocess calls.",
-    ),
-    (
-        "path_traversal",
-        "Potential Path Traversal",
-        re.compile(r'(?i)(open|read|write|include|require)\s*\([^)]*\.\./'),
-        "high", "CWE-22",
-        "A01:2021 – Broken Access Control",
-        "Validate and sanitize file paths. Use os.path.realpath to prevent traversal.",
-    ),
-]
-
-SENSITIVE_FILENAMES = {".env", ".env.local", ".env.production", ".env.staging"}
 
 
 class PatternScanner:
-    def scan(self, repo_path: str, file_list: list[str]) -> list[Finding]:
-        findings = []
-        for rel_path in file_list:
-            abs_path = os.path.join(repo_path, rel_path)
-            try:
-                content = Path(abs_path).read_text(errors="replace")
-                findings.extend(self._scan_file(rel_path, content))
-            except OSError:
+    """
+    Pattern-based vulnerability scanner.
+
+    Matches the original interface used by pipeline.py:
+        scanner = PatternScanner()
+        findings = scanner.scan(repo_path, file_list)
+    """
+
+    def __init__(self) -> None:
+        # No constructor arguments — repo_path is passed to scan()
+        pass
+
+    def scan(
+        self,
+        repo_path: Path,
+        file_list: Optional[List[Path]] = None,
+    ) -> List[Finding]:
+        """
+        Scan files for vulnerability patterns.
+
+        Args:
+            repo_path: Root of the cloned repository.
+            file_list: If provided, only scan these files.
+                       If None, scan all files under repo_path.
+        """
+        if file_list is not None:
+            files_to_scan = [Path(f) for f in file_list if Path(f).is_file()]
+        else:
+            files_to_scan = [
+                f for f in Path(repo_path).rglob("*")
+                if f.is_file()
+                and not any(part in SKIP_DIRS for part in f.parts)
+            ]
+
+        all_findings: List[Finding] = []
+        for file_path in files_to_scan:
+            if any(part in SKIP_DIRS for part in file_path.parts):
                 continue
-        return findings
+            all_findings.extend(self._scan_file(file_path, Path(repo_path)))
 
-    def _scan_file(self, rel_path: str, content: str) -> list[Finding]:
-        findings = []
+        return all_findings
+
+    def _scan_file(self, file_path: Path, repo_root: Path) -> List[Finding]:
+        suffix = file_path.suffix.lower()
+        if suffix not in SCANNABLE_EXTENSIONS:
+            return []
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return []
+
         lines = content.splitlines()
-        filename = Path(rel_path).name
+        try:
+            relative_path = str(file_path.relative_to(repo_root))
+        except ValueError:
+            relative_path = str(file_path)
 
-        # Flag committed .env files
-        if filename in SENSITIVE_FILENAMES:
-            findings.append(self._make_finding(
-                "exposed_env_file",
-                "Exposed .env File Committed to Repository",
-                "high", "CWE-538",
-                "A05:2021 – Security Misconfiguration",
-                "Add .env to .gitignore immediately. Rotate all secrets in the file.",
-                rel_path, 1, 1, content[:200],
-            ))
+        findings: List[Finding] = []
+        seen: set = set()
 
-        all_patterns = SECRET_PATTERNS + MISCONFIG_PATTERNS + INJECTION_PATTERNS
-        for vuln_type, title, pattern, severity, cwe, owasp, rec in all_patterns:
-            for i, line in enumerate(lines, 1):
-                if pattern.search(line):
-                    if any(skip in line.lower() for skip in [
-                        "example", "placeholder", "your-", "change-me", "xxx", "todo"
-                    ]):
-                        continue
-                    findings.append(self._make_finding(
-                        vuln_type, title, severity, cwe, owasp, rec,
-                        rel_path, i, i, line.strip()[:300],
-                    ))
+        for rule in PATTERNS:
+            if rule["extensions"] is not None and suffix not in rule["extensions"]:
+                continue
+            for match in rule["pattern"].finditer(content):
+                line_start = content.count("\n", 0, match.start()) + 1
+                line_end = line_start + match.group().count("\n")
+                key = (rule["title"], line_start)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                snippet_start = max(0, line_start - 2)
+                snippet_end = min(len(lines), line_end + 2)
+                code_snippet = "\n".join(lines[snippet_start:snippet_end]).strip()
+
+                findings.append(Finding(
+                    title=rule["title"],
+                    description=rule["description"],
+                    severity=rule["severity"],
+                    type=rule["type"],
+                    file_path=relative_path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    code_snippet=code_snippet,
+                    recommendation=rule["recommendation"],
+                    cwe_id=rule.get("cwe_id"),
+                    owasp_category=rule.get("owasp"),
+                ))
 
         return findings
-
-    def _make_finding(
-        self, vuln_type, title, severity, cwe, owasp, rec,
-        file_path, line_start, line_end, snippet,
-    ) -> Finding:
-        return Finding(
-            id=str(uuid.uuid4()),
-            type=vuln_type,
-            title=title,
-            description=f"Detected {title} in {file_path}:{line_start}",
-            severity=severity,
-            file_path=file_path,
-            line_start=line_start,
-            line_end=line_end,
-            code_snippet=snippet,
-            recommendation=rec,
-            cwe_id=cwe,
-            owasp_category=owasp,
-        )

@@ -20,7 +20,7 @@ function Section({ title, desc, children, t }: {
 }
 
 export default function ProfilePage() {
-  const { user } = useAuth()
+  const { user, signOut } = useAuth()
   const { isDark } = useTheme()
   const t = getTokens(isDark)
   const navigate = useNavigate()
@@ -31,19 +31,18 @@ export default function ProfilePage() {
   const [avatarUploading, setAvatarUploading] = useState(false)
   const [savingName, setSavingName] = useState(false)
   const [nameSuccess, setNameSuccess] = useState(false)
+  const [nameFocused, setNameFocused] = useState(false)
 
   const [newPw, setNewPw] = useState('')
   const [confirmPw, setConfirmPw] = useState('')
   const [savingPw, setSavingPw] = useState(false)
   const [pwError, setPwError] = useState<string | null>(null)
   const [pwSuccess, setPwSuccess] = useState(false)
+  const [pwFocused, setPwFocused] = useState<Record<string, boolean>>({})
 
   const [deleteConfirm, setDeleteConfirm] = useState('')
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
-
-  const [nameFocused, setNameFocused] = useState(false)
-  const [pwFocused, setPwFocused] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
     if (user) {
@@ -52,14 +51,11 @@ export default function ProfilePage() {
     }
   }, [user])
 
-  // ── Avatar upload ─────────────────────────────────────────────────────────
+  // ── Avatar ────────────────────────────────────────────────────────────────
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || !user) return
-    if (file.size > 2 * 1024 * 1024) {
-      alert('Image must be under 2MB.')
-      return
-    }
+    if (file.size > 2 * 1024 * 1024) { alert('Image must be under 2MB.'); return }
 
     setAvatarUploading(true)
     const ext = file.name.split('.').pop()
@@ -69,16 +65,16 @@ export default function ProfilePage() {
       .from('avatars')
       .upload(path, file, { upsert: true })
 
-    let newAvatarUrl: string | null = null
+    let newUrl: string | null = null
 
     if (uploadError) {
-      // Supabase Storage bucket not set up — fall back to base64 in metadata
-      const reader = new FileReader()
+      // Fallback: store as base64 in user metadata
       await new Promise<void>(resolve => {
+        const reader = new FileReader()
         reader.onload = async () => {
           const base64 = reader.result as string
           await supabase.auth.updateUser({ data: { avatar_url: base64 } })
-          newAvatarUrl = base64
+          newUrl = base64
           resolve()
         }
         reader.readAsDataURL(file)
@@ -86,17 +82,12 @@ export default function ProfilePage() {
     } else {
       const { data } = supabase.storage.from('avatars').getPublicUrl(path)
       await supabase.auth.updateUser({ data: { avatar_url: data.publicUrl } })
-      newAvatarUrl = data.publicUrl
+      newUrl = data.publicUrl
     }
 
-    // CRITICAL FIX: refreshSession forces Supabase to re-issue the JWT with
-    // the updated metadata, so the avatar persists across page navigation.
     await supabase.auth.refreshSession()
-
-    setAvatarUrl(newAvatarUrl)
+    setAvatarUrl(newUrl)
     setAvatarUploading(false)
-
-    // Reset file input so the same file can be re-selected if needed
     if (avatarInputRef.current) avatarInputRef.current.value = ''
   }
 
@@ -108,13 +99,11 @@ export default function ProfilePage() {
 
   // ── Display name ──────────────────────────────────────────────────────────
   const handleSaveName = async () => {
-    setSavingName(true)
-    setNameSuccess(false)
+    setSavingName(true); setNameSuccess(false)
     const { error } = await supabase.auth.updateUser({
       data: { display_name: displayName.trim() },
     })
     if (!error) {
-      // Refresh session so AppLayout and DashboardPage pick up the new name
       await supabase.auth.refreshSession()
       setNameSuccess(true)
       setTimeout(() => setNameSuccess(false), 3000)
@@ -125,8 +114,8 @@ export default function ProfilePage() {
   // ── Password ──────────────────────────────────────────────────────────────
   const handleChangePassword = async () => {
     setPwError(null); setPwSuccess(false)
-    if (newPw.length < 8) { setPwError('A senha deve ter no mínimo 8 caracteres.'); return }
-    if (newPw !== confirmPw) { setPwError('As senhas não coincidem.'); return }
+    if (newPw.length < 8) { setPwError('Password must be at least 8 characters.'); return }
+    if (newPw !== confirmPw) { setPwError('Passwords do not match.'); return }
     setSavingPw(true)
     const { error } = await supabase.auth.updateUser({ password: newPw })
     setSavingPw(false)
@@ -141,10 +130,11 @@ export default function ProfilePage() {
   // ── Delete account ────────────────────────────────────────────────────────
   const handleDeleteAccount = async () => {
     if (deleteConfirm !== user?.email || !user) return
-    setDeleting(true)
-    setDeleteError(null)
+    setDeleting(true); setDeleteError(null)
+
     try {
       const { data: { session } } = await supabase.auth.getSession()
+
       const response = await fetch(
         `${import.meta.env.VITE_API_URL}/api/v1/auth/delete-account`,
         {
@@ -155,12 +145,18 @@ export default function ProfilePage() {
           },
         }
       )
+
       if (!response.ok) {
         const err = await response.json().catch(() => ({}))
         throw new Error(err.detail ?? 'Failed to delete account.')
       }
-      await supabase.auth.signOut()
-      navigate('/')
+
+      // IMPORTANT: Use the same thorough signOut from useAuth so the session
+      // is revoked server-side AND localStorage is cleared — prevents the
+      // re-login-on-F5 bug AND ensures the user is truly signed out.
+      await signOut()
+
+      navigate('/', { replace: true })
     } catch (err: any) {
       setDeleteError(err.message)
       setDeleting(false)
@@ -185,7 +181,6 @@ export default function ProfilePage() {
 
       <div style={{ maxWidth: 680, animation: 'fadeIn 0.5s ease forwards' }}>
 
-        {/* Header */}
         <div style={{ marginBottom: 40 }}>
           <h1 style={{ fontSize: 'clamp(24px, 3vw, 36px)', fontWeight: 300, letterSpacing: '-1px', color: t.text }}>
             Account <span style={{ fontWeight: 600 }}>Settings</span>
@@ -203,13 +198,10 @@ export default function ProfilePage() {
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 overflow: 'hidden',
               }}>
-                {avatarUrl ? (
-                  <img src={avatarUrl} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                ) : (
-                  <span style={{ fontSize: 28, fontWeight: 700, color: t.text }}>
-                    {currentDisplayName.charAt(0).toUpperCase()}
-                  </span>
-                )}
+                {avatarUrl
+                  ? <img src={avatarUrl} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  : <span style={{ fontSize: 28, fontWeight: 700, color: t.text }}>{currentDisplayName.charAt(0).toUpperCase()}</span>
+                }
               </div>
               {avatarUploading && (
                 <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -217,7 +209,6 @@ export default function ProfilePage() {
                 </div>
               )}
             </div>
-
             <div>
               <input ref={avatarInputRef} type="file" accept="image/jpeg,image/png,image/gif,image/webp" style={{ display: 'none' }} onChange={handleAvatarChange} />
               <button onClick={() => avatarInputRef.current?.click()} disabled={avatarUploading} style={{
@@ -266,7 +257,6 @@ export default function ProfilePage() {
             </div>
             <p style={{ fontSize: 12, color: t.textMuted, marginTop: 6 }}>Leave blank to use your email username.</p>
           </div>
-
           <div>
             <label style={{ fontSize: 13, fontWeight: 500, color: t.textSecondary, display: 'block', marginBottom: 8 }}>Email</label>
             <div style={{ padding: '11px 14px', background: t.bgTertiary, border: `1.5px solid ${t.border}`, borderRadius: 8, fontSize: 14, color: t.textSecondary }}>
@@ -282,8 +272,7 @@ export default function ProfilePage() {
             <div>
               <label style={{ fontSize: 13, fontWeight: 500, color: t.textSecondary, display: 'block', marginBottom: 6 }}>New password</label>
               <input type="password" value={newPw} onChange={e => setNewPw(e.target.value)}
-                placeholder="Min. 8 characters"
-                style={inputStyle(pwFocused['new'])}
+                placeholder="Min. 8 characters" style={inputStyle(pwFocused['new'])}
                 onFocus={() => setPwFocused(p => ({ ...p, new: true }))}
                 onBlur={() => setPwFocused(p => ({ ...p, new: false }))}
               />
@@ -291,8 +280,7 @@ export default function ProfilePage() {
             <div>
               <label style={{ fontSize: 13, fontWeight: 500, color: t.textSecondary, display: 'block', marginBottom: 6 }}>Confirm new password</label>
               <input type="password" value={confirmPw} onChange={e => setConfirmPw(e.target.value)}
-                placeholder="Repeat new password"
-                style={inputStyle(pwFocused['confirm'])}
+                placeholder="Repeat new password" style={inputStyle(pwFocused['confirm'])}
                 onFocus={() => setPwFocused(p => ({ ...p, confirm: true }))}
                 onBlur={() => setPwFocused(p => ({ ...p, confirm: false }))}
               />
@@ -317,7 +305,7 @@ export default function ProfilePage() {
           <div style={{ border: '1px solid #fecaca', borderRadius: 10, padding: '20px 24px', background: isDark ? 'rgba(239,68,68,0.05)' : '#fff5f5' }}>
             <p style={{ fontSize: 14, fontWeight: 500, color: '#dc2626', marginBottom: 6 }}>Delete account</p>
             <p style={{ fontSize: 13, color: t.textSecondary, marginBottom: 16 }}>
-              Permanently deletes your account and all associated scan data. This action cannot be undone.
+              Permanently deletes your account and all associated scan data. This cannot be undone.
               To confirm, type your email address below.
             </p>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
