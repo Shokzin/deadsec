@@ -210,20 +210,6 @@ PATTERNS = [
     },
     {
         "pattern": re.compile(
-            r'\bopen\s*\(\s*(?:f["\']|["\'][^"\']*\+)',
-            re.IGNORECASE,
-        ),
-        "title": "Path Traversal — Dynamic File Path",
-        "description": "A file is opened with a dynamically constructed path.",
-        "severity": "high",
-        "type": "path_traversal",
-        "cwe_id": "CWE-22",
-        "owasp": "A01:2021 — Broken Access Control",
-        "recommendation": "Resolve the path with os.path.realpath() and verify it is within the expected directory.",
-        "extensions": {".py"},
-    },
-    {
-        "pattern": re.compile(
             r'(?:readFile|readFileSync|createReadStream)\s*\(\s*'
             r'(?:`[^`]*\$\{|[^)]*(?:req\.|request\.|params\.|body\.|query\.))',
             re.IGNORECASE,
@@ -246,7 +232,7 @@ PATTERNS = [
         "cwe_id": "CWE-22",
         "owasp": "A01:2021 — Broken Access Control",
         "recommendation": "Do not use relative traversal sequences. Resolve and validate all paths.",
-        "extensions": None,
+        "extensions": {".cfg", ".conf", ".ini", ".yaml", ".yml", ".json", ".env", ".php", ".rb"},
     },
 
     # ── XSS ───────────────────────────────────────────────────────────────────
@@ -522,11 +508,14 @@ class PatternScanner:
         """
         if file_list is not None:
             files_to_scan = []
+            seen_paths = set()
             for f in file_list:
                 p = Path(f)
                 if not p.is_absolute():
-                     p = Path(repo_path) / p
-                if p.is_file(): 
+                    p = Path(repo_path) / p
+                resolved = str(p.resolve())
+                if p.is_file() and resolved not in seen_paths:
+                    seen_paths.add(resolved)
                     files_to_scan.append(p)
         else:
             files_to_scan = [
@@ -567,7 +556,7 @@ class PatternScanner:
             for match in rule["pattern"].finditer(content):
                 line_start = content.count("\n", 0, match.start()) + 1
                 line_end = line_start + match.group().count("\n")
-                key = (rule["title"], line_start)
+                key = (rule["title"], relative_path, line_start)
                 if key in seen:
                     continue
                 seen.add(key)

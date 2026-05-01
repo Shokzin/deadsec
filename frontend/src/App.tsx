@@ -7,6 +7,7 @@ import DashboardPage from './pages/DashboardPage'
 import ScanPage from './pages/ScanPage'
 import ReportPage from './pages/ReportPage'
 import ProfilePage from './pages/ProfilePage'
+import ResetPasswordPage from './pages/ResetPasswordPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
@@ -38,6 +39,7 @@ function AppRoutes() {
       <Route path="/report/:scanId" element={<ProtectedRoute><ReportPage /></ProtectedRoute>} />
       <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
     </Routes>
   )
 }

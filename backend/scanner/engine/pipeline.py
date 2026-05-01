@@ -82,7 +82,7 @@ class ScanPipeline:
         seen = set()
         unique = []
         for v in vulns:
-            key = (v.file_path, v.line_start, v.type)
+            key = (v.file_path, v.line_start, v.title)
             if key not in seen:
                 seen.add(key)
                 unique.append(v)

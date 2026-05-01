@@ -180,7 +180,7 @@ useEffect(() => {
       // This tells Supabase where to redirect the user after they click the email link.
       // For local development: http://localhost:5173/auth
       // For production: https://your-domain.com/auth
-      redirectTo: `${window.location.origin}/auth`,
+      redirectTo: `${window.location.origin}/reset-password`,
     })
     setLoading(false)
     if (error) setError(error.message)
