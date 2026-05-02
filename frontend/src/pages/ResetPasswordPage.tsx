@@ -18,32 +18,26 @@ export default function ResetPasswordPage() {
 useEffect(() => {
   const hash = window.location.hash
   const params = new URLSearchParams(hash.replace('#', ''))
-  const searchParams = new URLSearchParams(window.location.search)
 
-  // Handle error in hash (expired/invalid)
+  // Handle error in hash immediately
   if (params.get('error') || params.get('error_code')) {
     setError('Reset link expired. Please request a new one.')
     window.history.replaceState(null, '', '/reset-password')
     return
   }
 
-  // Handle PKCE flow — code in query string
-  const code = searchParams.get('code')
-  if (code) {
-    supabase.auth.exchangeCodeForSession(code).then(({ error }) => {
-      if (error) {
-        setError('Reset link expired. Please request a new one.')
-      } else {
-        setReady(true)
-      }
-      window.history.replaceState(null, '', '/reset-password')
-    })
-    return
-  }
-
-  // Handle implicit flow — token in hash
+  // Set up listener FIRST before any async calls
   const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
-    if (event === 'PASSWORD_RECOVERY') {
+    if (event === 'PASSWORD_RECOVERY' || event === 'SIGNED_IN') {
+      setReady(true)
+      window.history.replaceState(null, '', '/reset-password')
+    }
+  })
+
+  // ALSO check getSession — the event may have already fired before
+  // this component mounted, so we can't rely on onAuthStateChange alone
+  supabase.auth.getSession().then(({ data: { session } }) => {
+    if (session) {
       setReady(true)
       window.history.replaceState(null, '', '/reset-password')
     }

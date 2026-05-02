@@ -59,34 +59,22 @@ export default function ProfilePage() {
 
     setAvatarUploading(true)
     const ext = file.name.split('.').pop()
-    const path = `avatars/${user.id}.${ext}`
+    const path = `${user.id}.${ext}`  // ← removed 'avatars/' prefix, bucket handles that
 
     const { error: uploadError } = await supabase.storage
       .from('avatars')
       .upload(path, file, { upsert: true })
 
-    let newUrl: string | null = null
-
     if (uploadError) {
-      // Fallback: store as base64 in user metadata
-      await new Promise<void>(resolve => {
-        const reader = new FileReader()
-        reader.onload = async () => {
-          const base64 = reader.result as string
-          await supabase.auth.updateUser({ data: { avatar_url: base64 } })
-          newUrl = base64
-          resolve()
-        }
-        reader.readAsDataURL(file)
-      })
-    } else {
-      const { data } = supabase.storage.from('avatars').getPublicUrl(path)
-      await supabase.auth.updateUser({ data: { avatar_url: data.publicUrl } })
-      newUrl = data.publicUrl
+      console.error('Upload error:', uploadError)
+      setAvatarUploading(false)
+      return
     }
 
+    const { data } = supabase.storage.from('avatars').getPublicUrl(path)
+    await supabase.auth.updateUser({ data: { avatar_url: data.publicUrl } })
     await supabase.auth.refreshSession()
-    setAvatarUrl(newUrl)
+    setAvatarUrl(data.publicUrl)
     setAvatarUploading(false)
     if (avatarInputRef.current) avatarInputRef.current.value = ''
   }
