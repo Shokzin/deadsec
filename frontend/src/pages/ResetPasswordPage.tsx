@@ -15,44 +15,43 @@ export default function ResetPasswordPage() {
   const t = getTokens(isDark)
   const navigate = useNavigate()
 
-useEffect(() => {
-  const hash = window.location.hash
-  const params = new URLSearchParams(hash.replace('#', ''))
+  useEffect(() => {
+    const hash = window.location.hash
+    const params = new URLSearchParams(hash.replace('#', ''))
 
-  // Handle error in hash immediately
-  if (params.get('error') || params.get('error_code')) {
-    setError('Reset link expired. Please request a new one.')
-    window.history.replaceState(null, '', '/reset-password')
-    return
-  }
-
-  // Set up listener FIRST before any async calls
-  const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
-    if (event === 'PASSWORD_RECOVERY' || event === 'SIGNED_IN') {
-      setReady(true)
+    if (params.get('error') || params.get('error_code')) {
+      setError('Reset link expired. Please request a new one.')
       window.history.replaceState(null, '', '/reset-password')
+      return
     }
-  })
 
-  // ALSO check getSession — the event may have already fired before
-  // this component mounted, so we can't rely on onAuthStateChange alone
-  supabase.auth.getSession().then(({ data: { session } }) => {
-    if (session) {
-      setReady(true)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'PASSWORD_RECOVERY' || event === 'SIGNED_IN') {
+        setReady(true)
+        window.history.replaceState(null, '', '/reset-password')
+      }
+    })
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) {
+        setReady(true)
+        window.history.replaceState(null, '', '/reset-password')
+      }
+    })
+
+    const timeout = setTimeout(() => {
+      setReady(prev => {
+        if (!prev) setError('Reset link expired. Please request a new one.')
+        return prev
+      })
       window.history.replaceState(null, '', '/reset-password')
+    }, 3000)
+
+    return () => {
+      subscription.unsubscribe()
+      clearTimeout(timeout)
     }
-  })
-
-  const timeout = setTimeout(() => {
-    setError('Reset link expired. Please request a new one.')
-    window.history.replaceState(null, '', '/reset-password')
-  }, 8000)
-
-  return () => {
-    subscription.unsubscribe()
-    clearTimeout(timeout)
-  }
-}, [])
+  }, [])
 
   const handleSubmit = async () => {
     setError(null)
