@@ -67,36 +67,37 @@ Results are scored from 0 to 100 using a weighted algorithm with diminishing pen
 ---
 
 ## How it works
-User submits GitHub URL
-│
-▼
-FastAPI receives request → validates JWT → queues Celery task → returns scan_id immediately
-│
-▼
-Celery worker picks up the task
-│
-├─ GitPython clones the repository into a secure temp directory
-│
-├─ Layer 1: Pattern Scanner (regex across all supported file types)
-├─ Layer 2: AST Analyzer (Python Abstract Syntax Tree parsing)
-└─ Layer 3: Rule Engine (logic-based cross-pattern detection)
-│
-▼
-Deduplication — findings from multiple layers merged by file + line + title
-│
-▼
-Scorer calculates security score (0–100, weighted with diminishing penalties)
-│
-▼
-Results saved to Supabase (PostgreSQL) with user_id isolation
-│
-▼
-Frontend receives real-time updates via Supabase Realtime + polling fallback
-│
-▼
-Full report rendered with expandable vulnerability cards
 
----
+```
+User submits GitHub URL
+        │
+        ▼
+FastAPI receives request → validates JWT → queues Celery task → returns scan_id immediately
+        │
+        ▼
+Celery worker picks up the task
+        │
+        ├─ GitPython clones the repository into a secure temp directory
+        │
+        ├─ Layer 1: Pattern Scanner (regex across all supported file types)
+        ├─ Layer 2: AST Analyzer (Python Abstract Syntax Tree parsing)
+        └─ Layer 3: Rule Engine (logic-based cross-pattern detection)
+                │
+                ▼
+        Deduplication — findings from multiple layers merged by file + line + title
+                │
+                ▼
+        Scorer calculates security score (0–100, weighted with diminishing penalties)
+                │
+                ▼
+        Results saved to Supabase (PostgreSQL) with user_id isolation
+                │
+                ▼
+Frontend receives real-time updates via Supabase Realtime + polling fallback
+                │
+                ▼
+        Full report rendered with expandable vulnerability cards
+```
 
 ## Tech stack
 
@@ -144,7 +145,7 @@ Full report rendered with expandable vulnerability cards
 - [x] Custom branded email templates via Resend
 
 **Semester 2 — planned 🔜**
-- [ ] AI layer — AIe integration for context-aware analysis
+- [ ] AI layer — AI integration for context-aware analysis
 - [ ] 10 new detection rules (Open Redirect, JWT None Algorithm, Prototype Pollution, and more)
 - [ ] Export report as PDF
 - [ ] Compare two scans — diff between runs
@@ -153,7 +154,7 @@ Full report rendered with expandable vulnerability cards
 - [ ] Rate limiting on scan endpoint
 - [ ] Scan history pagination
 - [ ] Centralized JWT middleware
-- [ ] Full deployment — Vercel (frontend) + Railway (backend)
+- [ ] Full deployment
 
 ---
 
