@@ -59,7 +59,7 @@ export default function ProfilePage() {
 
     setAvatarUploading(true)
     const ext = file.name.split('.').pop()
-    const path = `${user.id}.${ext}`  // ← removed 'avatars/' prefix, bucket handles that
+    const path = `${user.id}.${ext}`
 
     const { error: uploadError } = await supabase.storage
       .from('avatars')
@@ -72,14 +72,23 @@ export default function ProfilePage() {
     }
 
     const { data } = supabase.storage.from('avatars').getPublicUrl(path)
-    await supabase.auth.updateUser({ data: { avatar_url: data.publicUrl } })
+    // Cache-bust so browser fetches the new image instead of showing the old one
+    const urlWithCacheBust = `${data.publicUrl}?t=${Date.now()}`
+    await supabase.auth.updateUser({ data: { avatar_url: urlWithCacheBust } })
     await supabase.auth.refreshSession()
-    setAvatarUrl(data.publicUrl)
+    setAvatarUrl(urlWithCacheBust)
     setAvatarUploading(false)
     if (avatarInputRef.current) avatarInputRef.current.value = ''
   }
 
   const handleRemoveAvatar = async () => {
+    if (user) {
+      // Delete all possible extensions from storage
+      const exts = ['jpg', 'jpeg', 'png', 'gif', 'webp']
+      for (const ext of exts) {
+        await supabase.storage.from('avatars').remove([`${user.id}.${ext}`])
+      }
+    }
     await supabase.auth.updateUser({ data: { avatar_url: null } })
     await supabase.auth.refreshSession()
     setAvatarUrl(null)
@@ -139,11 +148,7 @@ export default function ProfilePage() {
         throw new Error(err.detail ?? 'Failed to delete account.')
       }
 
-      // IMPORTANT: Use the same thorough signOut from useAuth so the session
-      // is revoked server-side AND localStorage is cleared — prevents the
-      // re-login-on-F5 bug AND ensures the user is truly signed out.
       await signOut()
-
       navigate('/', { replace: true })
     } catch (err: any) {
       setDeleteError(err.message)
